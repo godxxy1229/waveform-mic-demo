@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Waveform</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #fff;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 32px 20px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    gap: 20px;
+  }
+  .row {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+  .label {
+    font-size: 12px;
+    color: rgba(0,0,0,0.4);
+    font-variant-numeric: tabular-nums;
+  }
+  canvas { display: block; }
+  .start-btn {
+    padding: 10px 28px;
+    font-size: 14px;
+    font-weight: 500;
+    color: #fff;
+    background: #000;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: opacity 0.2s;
+  }
+  .start-btn:hover { opacity: 0.7; }
+  .status { font-size: 12px; color: rgba(0,0,0,0.35); height: 16px; }
+</style>
+</head>
+<body>
+
+<div class="row">
+  <div class="label">B: STEP=6, 100ms — Fast & dense</div>
+  <canvas id="cvB"></canvas>
+</div>
+<div class="row">
+  <div class="label">C: STEP=8, 133ms — Medium</div>
+  <canvas id="cvC"></canvas>
+</div>
+<div class="row">
+  <div class="label">D: STEP=10, 167ms — Wide & slow</div>
+  <canvas id="cvD"></canvas>
+</div>
+
+<button class="start-btn" id="btn">Start Mic</button>
+<div class="status" id="status"></div>
+
+<script>
+const dpr = window.devicePixelRatio || 1;
+const CSS_W = 390, CSS_H = 96, CY = CSS_H / 2;
+const PX_W = Math.round(CSS_W * dpr);
+const PX_H = Math.round(CSS_H * dpr);
+const FADE_L = 50;
+
+const configs = [
+  { id: 'cvB', barW: 3, gap: 3, step: 6,  addMs: 100,    anchor: CSS_W - 24, fadeR: CSS_W - 60, max: 65 },
+  { id: 'cvC', barW: 3, gap: 5, step: 8,  addMs: 133.33, anchor: CSS_W - 30, fadeR: CSS_W - 80, max: 50 },
+  { id: 'cvD', barW: 3, gap: 7, step: 10, addMs: 166.67, anchor: CSS_W - 36, fadeR: CSS_W - 90, max: 40 },
+];
+
+const variants = configs.map(cfg => {
+  const cv = document.getElementById(cfg.id);
+  cv.width  = PX_W;
+  cv.height = PX_H;
+  cv.style.width  = (PX_W / dpr) + 'px';
+  cv.style.height = (PX_H / dpr) + 'px';
+
+  const off = document.createElement('canvas');
+  off.width  = PX_W;
+  off.height = PX_H;
+  const offCtx = off.getContext('2d');
+  offCtx.scale(dpr, dpr);
+
+  return {
+    ...cfg,
+    ctx: cv.getContext('2d'),
+    offCtx, off,
+    pxPerMs: cfg.step / cfg.addMs,
+    barBuf: new Uint8Array(cfg.max),
+    barHead: 0, barCount: 0, scroll: 0,
+  };
+});
+
+for (const v of variants) v.ctx.scale(dpr, dpr);
+
+function pushBar(v, halfH) {
+  v.barBuf[v.barHead] = halfH;
+  v.barHead = (v.barHead + 1) % v.max;
+  if (v.barCount < v.max) v.barCount++;
+}
+function getBar(v, i) {
+  return v.barBuf[(v.barHead - v.barCount + i + v.max) % v.max];
+}
+
+let audioCtx = null, analyser = null, dataArray = null, stream = null;
+let running = false, prev = 0, lastRMS = 0;
+
+function updateRMS() {
+  if (!analyser) { lastRMS = 0; return; }
+  analyser.getByteTimeDomainData(dataArray);
+  let sum = 0;
+  for (let i = 0; i < dataArray.length; i++) {
+    const v = (dataArray[i] - 128) / 128;
+    sum += v * v;
+  }
+  lastRMS = Math.sqrt(sum / dataArray.length);
+}
+
+function rmsToHalf(rms) {
+  return (3 + Math.min(1, rms * 3) * 42 + 0.5) | 0;
+}
+
+function frame(ts) {
+  if (!running) return;
+  if (!prev) prev = ts;
+  const dt = Math.min(ts - prev, 50);
+  prev = ts;
+
+  updateRMS();
+  const halfH = rmsToHalf(lastRMS);
+
+  for (const v of variants) {
+    v.scroll += v.pxPerMs * dt;
+    while (v.scroll >= v.step) {
+      v.scroll -= v.step;
+      pushBar(v, halfH);
+    }
+
+    const oc = v.offCtx;
+    oc.clearRect(0, 0, CSS_W, CSS_H);
+    oc.fillStyle = '#000';
+    const n = v.barCount;
+
+    for (let i = 0; i < n; i++) {
+      const x = v.anchor - (n - 1 - i) * v.step - v.scroll;
+      if (x < -v.barW || x > CSS_W) continue;
+
+      let a = x > v.fadeR ? 1 - (x - v.fadeR) / (CSS_W - v.fadeR)
+            : x < FADE_L ? x / FADE_L : 1;
+      if (i === n - 1) a *= v.scroll / v.step;
+      if (a <= 0) continue;
+
+      const h = getBar(v, i);
+      oc.globalAlpha = a;
+      oc.fillRect(x, CY - h, v.barW, h * 2);
+    }
+    oc.globalAlpha = 1;
+
+    v.ctx.clearRect(0, 0, CSS_W, CSS_H);
+    v.ctx.drawImage(v.off, 0, 0, PX_W, PX_H, 0, 0, CSS_W, CSS_H);
+  }
+
+  requestAnimationFrame(frame);
+}
+
+const btn = document.getElementById('btn');
+const statusEl = document.getElementById('status');
+
+async function start() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) { statusEl.textContent = 'Microphone permission required'; return; }
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const source = audioCtx.createMediaStreamSource(stream);
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  dataArray = new Uint8Array(analyser.fftSize);
+  source.connect(analyser);
+  running = true; prev = 0;
+  btn.textContent = 'Stop';
+  statusEl.textContent = 'Recording…';
+  requestAnimationFrame(frame);
+}
+
+function stop() {
+  running = false;
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  if (audioCtx) { audioCtx.close(); audioCtx = null; analyser = null; }
+  btn.textContent = 'Start Mic';
+  statusEl.textContent = '';
+}
+
+btn.addEventListener('click', () => running ? stop() : start());
+</script>
+</body>
+</html>
